@@ -27,10 +27,11 @@ type Page struct {
 }
 
 type Crawler struct {
-	startUrl string
-	host     string
-	visited  map[string]bool
-	sitemap  map[string]Page
+	startUrl    string
+	host        string
+	domainRegex *regexp.Regexp
+	visited     map[string]bool
+	sitemap     map[string]Page
 }
 
 func NewCrawler(startUrl string) *Crawler {
@@ -39,7 +40,14 @@ func NewCrawler(startUrl string) *Crawler {
 		ERROR.Println(err)
 		os.Exit(1)
 	}
-	return &Crawler{startUrl, u.Host, make(map[string]bool), make(map[string]Page)}
+
+	// build domain regex
+	urlParts := regexp.MustCompile(`\.`).Split(u.Host, 3)
+	// break hostname into pieces www.google.com -> ['www', 'google', 'com']
+	domainPattern := fmt.Sprintf("^(?:https?://)?(?:www\\.)?%s\\.%s.*$", urlParts[1], urlParts[2])
+	domainRegex := regexp.MustCompile(domainPattern)
+
+	return &Crawler{startUrl, u.Host, domainRegex, make(map[string]bool), make(map[string]Page)}
 }
 
 func (crawler *Crawler) Crawl() {
@@ -59,81 +67,129 @@ func (crawler *Crawler) crawl(url string) {
 		ERROR.Println(err)
 		os.Exit(1)
 	}
-	page := &Page{url, make([]string, 0), make([]string, 0)}
+
+	// create a new page to represent this url
+	page := &Page{
+		url,
+		crawler.gatherLinks(tree, url),
+		crawler.gatherAssets(tree, url),
+	}
 	crawler.visited[url] = true
-	links := crawler.gatherLinks(tree, url)
-	// assets := crawler.gatherAssets(tree)
-	fmt.Println(page, links)
+
+	fmt.Println("Page  : ", page.referrer)
+	fmt.Println("Urls  : ")
+	for i, u := range page.urls {
+		fmt.Printf("\t%d -> %s\n", i, u)
+	}
+	fmt.Println("Assets: ")
+	for i, a := range page.assets {
+		fmt.Printf("\t%d -> %s\n", i, a)
+	}
 }
 
-func (crawler *Crawler) gatherAssets(n *html.Node) []string {
+func (crawler *Crawler) gatherAssets(n *html.Node, ref string) []string {
+	// create a slice to hold assets
+	assets := make([]string, 0)
+
 	// only examine img, link, or script tags
 	if n.Type == html.ElementNode &&
 		(n.Data == "img" || n.Data == "link" || n.Data == "script") {
 		for _, img := range n.Attr {
 			switch img.Key {
-			case "src":
-				fmt.Println(img.Val)
-			case "href":
-				fmt.Println(img.Val)
+			case "src", "href":
+				assets = append(assets, crawler.processUrl(img.Val, ref))
 			}
 		}
 	}
 
 	// recurse over other nodes in the HTML tree
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		crawler.gatherAssets(c)
+		newAssets := crawler.gatherAssets(c, ref)
+		if newAssets != nil {
+			assets = append(assets, newAssets...)
+		}
 	}
 
-	return []string{"-1"}
+	return assets
 }
 
 func (crawler *Crawler) gatherLinks(n *html.Node, ref string) []string {
-	urlParts := regexp.MustCompile(`\.`).Split(crawler.host, 3)
-	domainPattern := fmt.Sprintf("^(?:https?://)?(?:www\\.)?%s\\.%s.*$", urlParts[1], urlParts[2])
-	domainRegex := regexp.MustCompile(domainPattern)
+
+	// create a slice to hold urls
+	links := make([]string, 0)
 
 	// only examine links
 	if n.Type == html.ElementNode && n.Data == "a" {
 		for _, a := range n.Attr {
 			if a.Key == "href" {
-				u, err := url.Parse(a.Val)
-				// if a url is invalid, it cannot be crawled. skip it.
-				if err != nil {
-					INFO.Println(err)
+				u := crawler.processUrl(a.Val, ref)
+
+				// errors handled by processUrl
+				if u == "" {
 					continue
 				}
 
-				// handle relative urls by prepending the domain
-				if !u.IsAbs() {
-					// ignore fragments
-					if u.Path == "" {
-						INFO.Println("Skipped URL, fragment")
-						continue
-					}
-					// prepend referring page
-					INFO.Println("Found relative URL ", u.String(), " prepending referrer")
-					u.Path = ref + u.Path
-				}
-				if !domainRegex.MatchString(u.String()) {
-					INFO.Println("Skipped URL ", u.String(), " not of domain ", crawler.host)
+				// ignore links not of this domain
+				if !crawler.domainRegex.MatchString(u) {
+					INFO.Println("Skipped URL", u, "not of domain", crawler.host)
 					continue
 				}
+
 				// if we have already seen this url, do not record it again
-				if crawler.visited[u.String()] {
-					INFO.Println("Skipped URL ", u.String(), " have already seen it")
+				if crawler.visited[u] {
+					INFO.Println("Skipped URL", u, "have already seen it")
 					continue
 				}
-				crawler.visited[u.String()] = true
-				fmt.Println(u.String())
+
+				// mark this url as visited
+				crawler.visited[u] = true
+
+				// add it to the list of urls found on this page
+				links = append(links, u)
 			}
 		}
 	}
 
-	// recurse over other nodes in the HTML tree
+	// recurse over other HTML nodes on this page gathering links
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		crawler.gatherLinks(c, ref)
+		newLinks := crawler.gatherLinks(c, ref)
+		if newLinks != nil {
+			links = append(links, newLinks...)
+		}
 	}
 
-	return []string{"-1"}
+	return links
+}
+
+func (crawler *Crawler) processUrl(href, ref string) string {
+	u, err := url.Parse(href)
+
+	// if a url is invalid, it cannot be crawled. skip it.
+	if err != nil {
+		// INFO.Println(err)
+		return ""
+	}
+
+	// handle relative urls by prepending the domain
+	if !u.IsAbs() {
+		// ignore fragments
+		if u.Path == "" {
+			INFO.Println("Skipped URL, fragment")
+			return ""
+		}
+
+		// process links with // prepended, which means inherit the current page's protocol
+		if u.Host != "" {
+			refURL, _ := url.Parse(ref)
+			INFO.Println("Found relative URL with preceding double slash", u.String(), "inheriting referrer page's protocol", refURL.Scheme)
+			// prepend protocol of referring page to URL
+			u.Scheme = refURL.Scheme
+		} else {
+			// prepend referring page
+			INFO.Println("Found relative URL", u.String(), "prepending referrer", ref)
+			u.Path = ref + u.Path
+		}
+	}
+
+	return u.String()
 }
