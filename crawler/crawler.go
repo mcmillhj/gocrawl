@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strings"
 )
 
 var (
@@ -31,7 +32,7 @@ type Crawler struct {
 	host        string
 	domainRegex *regexp.Regexp
 	visited     map[string]bool
-	sitemap     map[string]Page
+	sitemap     map[string]*Page
 }
 
 func NewCrawler(startUrl string) *Crawler {
@@ -47,18 +48,69 @@ func NewCrawler(startUrl string) *Crawler {
 	domainPattern := fmt.Sprintf("^(?:https?://)?(?:www\\.)?%s\\.%s.*$", urlParts[1], urlParts[2])
 	domainRegex := regexp.MustCompile(domainPattern)
 
-	return &Crawler{startUrl, u.Host, domainRegex, make(map[string]bool), make(map[string]Page)}
+	return &Crawler{startUrl, u.Host, domainRegex, make(map[string]bool), make(map[string]*Page)}
 }
 
 func (crawler *Crawler) Crawl() {
-	crawler.crawl(crawler.startUrl)
+	// urls to crawl
+	urls := []string{crawler.startUrl}
+
+	for i := 0; i < len(urls); i++ {
+		u := urls[i]
+
+		// skip urls we have already crawled
+		if crawler.visited[u] {
+			continue
+		}
+		INFO.Println("Crawling", u)
+		crawledPage := crawler.crawl(u)
+		if crawledPage == nil {
+			continue
+		}
+
+		// save this Page
+		crawler.sitemap[u] = crawledPage
+
+		// mark this url as visited
+		crawler.visited[u] = true
+
+		// add any urls returned from this Page to the queue to be crawled
+		urls = append(urls, crawledPage.urls...)
+	}
+
+	fmt.Println("Crawled", len(crawler.sitemap), "pages")
+
+	// print out all Pages
+	for url, page := range crawler.sitemap {
+		fmt.Println("Page: ", url)
+		fmt.Println("Urls  : ")
+		for i, u := range page.urls {
+			fmt.Printf("\t%d -> %s\n", i, u)
+		}
+		fmt.Println("Assets: ")
+		for i, a := range page.assets {
+			fmt.Printf("\t%d -> %s\n", i, a)
+		}
+	}
 }
 
-func (crawler *Crawler) crawl(url string) {
+func (crawler *Crawler) crawl(url string) *Page {
 	response, err := http.Get(url)
 	if err != nil {
 		ERROR.Println(err)
-		os.Exit(1)
+		// os.Exit(1)
+		return nil
+	}
+
+	if !strings.Contains(response.Header["Content-Type"][0], "text/html") {
+		INFO.Println("HTTP GET", url, "has Content-Type of", response.Header["Content-Type"])
+		return nil
+	}
+
+	// only proceed to pages with 200 response code
+	if response.StatusCode != 200 {
+		INFO.Println("HTTP GET", url, "returned status:", response.Status)
+		return nil
 	}
 
 	defer response.Body.Close()
@@ -69,21 +121,10 @@ func (crawler *Crawler) crawl(url string) {
 	}
 
 	// create a new page to represent this url
-	page := &Page{
+	return &Page{
 		url,
 		crawler.gatherLinks(tree, url),
 		crawler.gatherAssets(tree, url),
-	}
-	crawler.visited[url] = true
-
-	fmt.Println("Page  : ", page.referrer)
-	fmt.Println("Urls  : ")
-	for i, u := range page.urls {
-		fmt.Printf("\t%d -> %s\n", i, u)
-	}
-	fmt.Println("Assets: ")
-	for i, a := range page.assets {
-		fmt.Printf("\t%d -> %s\n", i, a)
 	}
 }
 
@@ -131,18 +172,9 @@ func (crawler *Crawler) gatherLinks(n *html.Node, ref string) []string {
 
 				// ignore links not of this domain
 				if !crawler.domainRegex.MatchString(u) {
-					INFO.Println("Skipped URL", u, "not of domain", crawler.host)
+					// INFO.Println("Skipped URL", u, "not of domain", crawler.host)
 					continue
 				}
-
-				// if we have already seen this url, do not record it again
-				if crawler.visited[u] {
-					INFO.Println("Skipped URL", u, "have already seen it")
-					continue
-				}
-
-				// mark this url as visited
-				crawler.visited[u] = true
 
 				// add it to the list of urls found on this page
 				links = append(links, u)
@@ -174,20 +206,26 @@ func (crawler *Crawler) processUrl(href, ref string) string {
 	if !u.IsAbs() {
 		// ignore fragments
 		if u.Path == "" {
-			INFO.Println("Skipped URL, fragment")
+			// INFO.Println("Skipped URL, fragment")
 			return ""
 		}
 
 		// process links with // prepended, which means inherit the current page's protocol
 		if u.Host != "" {
 			refURL, _ := url.Parse(ref)
-			INFO.Println("Found relative URL with preceding double slash", u.String(), "inheriting referrer page's protocol", refURL.Scheme)
+			// INFO.Println("Found relative URL with preceding double slash", u.String(), "inheriting referrer page's protocol", refURL.Scheme)
 			// prepend protocol of referring page to URL
 			u.Scheme = refURL.Scheme
 		} else {
-			// prepend referring page
-			INFO.Println("Found relative URL", u.String(), "prepending referrer", ref)
-			u.Path = ref + u.Path
+			if !strings.HasPrefix(u.Path, "/") {
+				// prepend referring page
+				// INFO.Println("Found relative URL", u.String(), "prepending referrer", ref)
+				u.Path = ref + u.Path
+			} else {
+				// prepend top-level domain
+				// INFO.Println("Found relative URL", u.String(), "prepending domain", crawler.startUrl)
+				u.Path = crawler.startUrl + u.Path
+			}
 		}
 	}
 
