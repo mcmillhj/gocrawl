@@ -1,8 +1,10 @@
 package crawler
 
 import (
-	"code.google.com/p/go.net/html"
+	"code.google.com/p/go.net/html" // HTML parser
 	"fmt"
+	"github.com/PuerkitoBio/purell" // URL Normalizer
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -31,7 +33,9 @@ type Crawler struct {
 	startUrl    string
 	host        string
 	domainRegex *regexp.Regexp
+	doNotCrawl  map[string]bool
 	visited     map[string]bool
+	errors      map[string]bool
 	sitemap     map[string]*Page
 }
 
@@ -48,10 +52,21 @@ func NewCrawler(startUrl string) *Crawler {
 	domainPattern := fmt.Sprintf("^(?:https?://)?(?:www\\.)?%s\\.%s.*$", urlParts[1], urlParts[2])
 	domainRegex := regexp.MustCompile(domainPattern)
 
-	return &Crawler{startUrl, u.Host, domainRegex, make(map[string]bool), make(map[string]*Page)}
+	return &Crawler{
+		startUrl,
+		u.Host,
+		domainRegex,
+		nil,
+		make(map[string]bool),
+		make(map[string]bool),
+		make(map[string]*Page),
+	}
 }
 
 func (crawler *Crawler) Crawl() {
+	// download robots.txt and parse
+	crawler.doNotCrawl = crawler.parseRobots()
+
 	// urls to crawl
 	urls := []string{crawler.startUrl}
 
@@ -59,10 +74,12 @@ func (crawler *Crawler) Crawl() {
 		u := urls[i]
 
 		// skip urls we have already crawled
-		if crawler.visited[u] {
+		// or already recorded an error on
+		// or robots.txt says not to crawl this page
+		if crawler.visited[u] || crawler.errors[u] || crawler.doNotCrawl[u] {
 			continue
 		}
-		INFO.Println("Crawling", u)
+		// INFO.Println("Crawling", u)
 		crawledPage := crawler.crawl(u)
 		if crawledPage == nil {
 			continue
@@ -78,13 +95,13 @@ func (crawler *Crawler) Crawl() {
 		urls = append(urls, crawledPage.urls...)
 	}
 
-	fmt.Println("Crawled", len(crawler.sitemap), "pages")
-
+	var urlcount int = 0
 	// print out all Pages
 	for url, page := range crawler.sitemap {
 		fmt.Println("Page: ", url)
 		fmt.Println("Urls  : ")
 		for i, u := range page.urls {
+			urlcount++
 			fmt.Printf("\t%d -> %s\n", i, u)
 		}
 		fmt.Println("Assets: ")
@@ -92,37 +109,48 @@ func (crawler *Crawler) Crawl() {
 			fmt.Printf("\t%d -> %s\n", i, a)
 		}
 	}
+
+	fmt.Println("Crawled", len(crawler.sitemap), "pages, with a total of", urlcount, "urls")
 }
 
 func (crawler *Crawler) crawl(url string) *Page {
 	response, err := http.Get(url)
 	if err != nil {
-		ERROR.Println(err)
+		// ERROR.Println(err)
 		// os.Exit(1)
 		return nil
 	}
 
 	if !strings.Contains(response.Header["Content-Type"][0], "text/html") {
-		INFO.Println("HTTP GET", url, "has Content-Type of", response.Header["Content-Type"])
+		// INFO.Println("HTTP GET", url, "has Content-Type of", response.Header["Content-Type"])
+		crawler.errors[url] = true
 		return nil
 	}
 
 	// only proceed to pages with 200 response code
 	if response.StatusCode != 200 {
-		INFO.Println("HTTP GET", url, "returned status:", response.Status)
+		// INFO.Println("HTTP GET", url, "returned status:", response.Status)
+		crawler.errors[url] = true
+		return nil
+	}
+
+	// ignore pages that redirect to a non domain page
+	if !crawler.domainRegex.MatchString(response.Request.URL.String()) {
+		// INFO.Println("Redirect from", url, "to non-domain url", response.Request.URL.String(), "detected")
+		crawler.errors[url] = true
 		return nil
 	}
 
 	defer response.Body.Close()
 	tree, err := html.Parse(response.Body)
 	if err != nil {
-		ERROR.Println(err)
+		// ERROR.Println(err)
 		os.Exit(1)
 	}
 
 	// create a new page to represent this url
 	return &Page{
-		url,
+		response.Request.URL.String(),
 		crawler.gatherLinks(tree, url),
 		crawler.gatherAssets(tree, url),
 	}
@@ -194,8 +222,15 @@ func (crawler *Crawler) gatherLinks(n *html.Node, ref string) []string {
 }
 
 func (crawler *Crawler) processUrl(href, ref string) string {
-	u, err := url.Parse(href)
 
+	// normalize url
+	urlString, err := purell.NormalizeURLString(href, purell.FlagsSafe|purell.FlagsUsuallySafeNonGreedy)
+	if err != nil {
+		// INFO.Println(err)
+		return ""
+	}
+
+	u, err := url.Parse(urlString)
 	// if a url is invalid, it cannot be crawled. skip it.
 	if err != nil {
 		// INFO.Println(err)
@@ -230,4 +265,23 @@ func (crawler *Crawler) processUrl(href, ref string) string {
 	}
 
 	return u.String()
+}
+
+func (crawler *Crawler) parseRobots() map[string]bool {
+	response, err := http.Get(crawler.startUrl + "/robots.txt")
+	if err != nil {
+		// handle error
+	}
+	defer response.Body.Close()
+	robots, err := ioutil.ReadAll(response.Body)
+
+	doNotCrawlMap := make(map[string]bool)
+	disallowPattern := regexp.MustCompile("Disallow: (.*)$")
+	for _, line := range strings.Split(string(robots), "\n") {
+		if matches := disallowPattern.FindStringSubmatch(line); len(matches) > 0 {
+			doNotCrawlMap[crawler.processUrl(matches[1], crawler.startUrl)] = true
+		}
+	}
+
+	return doNotCrawlMap
 }
