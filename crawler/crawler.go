@@ -2,6 +2,7 @@ package crawler
 
 import (
 	"code.google.com/p/go.net/html"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -35,23 +36,34 @@ type Crawler struct {
 	sitemap     map[string]*Page
 }
 
-func NewCrawler(startUrl string) *Crawler {
+func NewCrawler(startUrl string) (*Crawler, error) {
 	u, err := url.Parse(startUrl)
 	if err != nil {
 		ERROR.Println(err)
-		os.Exit(1)
+		return nil, err
+	}
+
+	if u.Host == "" {
+		return nil, errors.New("Invalid starting URL" + startUrl)
 	}
 
 	// build domain regex
 	urlParts := regexp.MustCompile(`\.`).Split(u.Host, 3)
+
 	// break hostname into pieces www.google.com -> ['www', 'google', 'com']
 	domainPattern := fmt.Sprintf("^(?:https?://)?(?:www\\.)?%s\\.%s.*$", urlParts[1], urlParts[2])
 	domainRegex := regexp.MustCompile(domainPattern)
 
-	return &Crawler{startUrl, u.Host, domainRegex, make(map[string]bool), make(map[string]*Page)}
+	return &Crawler{
+		startUrl,
+		u.Host,
+		domainRegex,
+		make(map[string]bool),
+		make(map[string]*Page),
+	}, nil
 }
 
-func (crawler *Crawler) Crawl() {
+func (crawler *Crawler) Crawl() ([]*Page, error) {
 	// urls to crawl
 	urls := []string{crawler.startUrl}
 
@@ -62,9 +74,10 @@ func (crawler *Crawler) Crawl() {
 		if crawler.visited[u] {
 			continue
 		}
+
 		INFO.Println("Crawling", u)
-		crawledPage := crawler.crawl(u)
-		if crawledPage == nil {
+		crawledPage, err := crawler.crawl(u)
+		if err != nil {
 			continue
 		}
 
@@ -92,32 +105,33 @@ func (crawler *Crawler) Crawl() {
 			fmt.Printf("\t%d -> %s\n", i, a)
 		}
 	}
+
+	return make([]*Page, 0), nil
 }
 
-func (crawler *Crawler) crawl(url string) *Page {
+func (crawler *Crawler) crawl(url string) (*Page, error) {
 	response, err := http.Get(url)
 	if err != nil {
 		ERROR.Println(err)
-		// os.Exit(1)
-		return nil
+		return nil, err
 	}
 
 	if !strings.Contains(response.Header["Content-Type"][0], "text/html") {
 		INFO.Println("HTTP GET", url, "has Content-Type of", response.Header["Content-Type"])
-		return nil
+		return nil, errors.New("LOG: Invalid Content-Type")
 	}
 
 	// only proceed to pages with 200 response code
 	if response.StatusCode != 200 {
 		INFO.Println("HTTP GET", url, "returned status:", response.Status)
-		return nil
+		return nil, errors.New("")
 	}
 
 	defer response.Body.Close()
 	tree, err := html.Parse(response.Body)
 	if err != nil {
 		ERROR.Println(err)
-		os.Exit(1)
+		return nil, err
 	}
 
 	// create a new page to represent this url
@@ -125,7 +139,7 @@ func (crawler *Crawler) crawl(url string) *Page {
 		url,
 		crawler.gatherLinks(tree, url),
 		crawler.gatherAssets(tree, url),
-	}
+	}, nil
 }
 
 func (crawler *Crawler) gatherAssets(n *html.Node, ref string) []string {
@@ -138,7 +152,10 @@ func (crawler *Crawler) gatherAssets(n *html.Node, ref string) []string {
 		for _, img := range n.Attr {
 			switch img.Key {
 			case "src", "href":
-				assets = append(assets, crawler.processUrl(img.Val, ref))
+				u, err := crawler.processUrl(img.Val, ref)
+				if err != nil {
+					assets = append(assets, u)
+				}
 			}
 		}
 	}
@@ -155,7 +172,6 @@ func (crawler *Crawler) gatherAssets(n *html.Node, ref string) []string {
 }
 
 func (crawler *Crawler) gatherLinks(n *html.Node, ref string) []string {
-
 	// create a slice to hold urls
 	links := make([]string, 0)
 
@@ -163,10 +179,10 @@ func (crawler *Crawler) gatherLinks(n *html.Node, ref string) []string {
 	if n.Type == html.ElementNode && n.Data == "a" {
 		for _, a := range n.Attr {
 			if a.Key == "href" {
-				u := crawler.processUrl(a.Val, ref)
+				u, err := crawler.processUrl(a.Val, ref)
 
 				// errors handled by processUrl
-				if u == "" {
+				if err != nil {
 					continue
 				}
 
@@ -193,13 +209,12 @@ func (crawler *Crawler) gatherLinks(n *html.Node, ref string) []string {
 	return links
 }
 
-func (crawler *Crawler) processUrl(href, ref string) string {
+func (crawler *Crawler) processUrl(href, ref string) (string, error) {
 	u, err := url.Parse(href)
-
 	// if a url is invalid, it cannot be crawled. skip it.
 	if err != nil {
 		// INFO.Println(err)
-		return ""
+		return "", err
 	}
 
 	// handle relative urls by prepending the domain
@@ -207,7 +222,7 @@ func (crawler *Crawler) processUrl(href, ref string) string {
 		// ignore fragments
 		if u.Path == "" {
 			// INFO.Println("Skipped URL, fragment")
-			return ""
+			return "", errors.New("")
 		}
 
 		// process links with // prepended, which means inherit the current page's protocol
@@ -229,5 +244,5 @@ func (crawler *Crawler) processUrl(href, ref string) string {
 		}
 	}
 
-	return u.String()
+	return u.String(), nil
 }

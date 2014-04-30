@@ -5,6 +5,9 @@ import (
 )
 
 func main() {
-	c := crawler.NewCrawler("http://www.digitalocean.com")
+	c, err := crawler.NewCrawler("http://www.digitalocean.com")
+	if err != nil {
+		os.Exit(1)
+	}
 	c.Crawl()
 }
