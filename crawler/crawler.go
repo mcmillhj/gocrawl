@@ -23,9 +23,9 @@ func init() {
 }
 
 type Page struct {
-	referrer string
-	urls     []string
-	assets   []string
+	Referrer string
+	Urls     []string
+	Assets   []string
 }
 
 type Crawler struct {
@@ -33,7 +33,6 @@ type Crawler struct {
 	host        string
 	domainRegex *regexp.Regexp
 	visited     map[string]bool
-	sitemap     map[string]*Page
 }
 
 func NewCrawler(startUrl string) (*Crawler, error) {
@@ -59,7 +58,6 @@ func NewCrawler(startUrl string) (*Crawler, error) {
 		u.Host,
 		domainRegex,
 		make(map[string]bool),
-		make(map[string]*Page),
 	}, nil
 }
 
@@ -67,46 +65,38 @@ func (crawler *Crawler) Crawl() ([]*Page, error) {
 	// urls to crawl
 	urls := []string{crawler.startUrl}
 
+	// pages already crawled
+	pages := make([]*Page, 0)
+
+	// errors encountered to avoid recrawling
+	errors := make(map[string]bool)
+
 	for i := 0; i < len(urls); i++ {
 		u := urls[i]
 
 		// skip urls we have already crawled
-		if crawler.visited[u] {
+		if crawler.visited[u] || errors[u] {
 			continue
 		}
 
 		INFO.Println("Crawling", u)
 		crawledPage, err := crawler.crawl(u)
 		if err != nil {
+			errors[u] = true
 			continue
 		}
 
 		// save this Page
-		crawler.sitemap[u] = crawledPage
+		pages = append(pages, crawledPage)
 
 		// mark this url as visited
 		crawler.visited[u] = true
 
 		// add any urls returned from this Page to the queue to be crawled
-		urls = append(urls, crawledPage.urls...)
+		urls = append(urls, crawledPage.Urls...)
 	}
 
-	fmt.Println("Crawled", len(crawler.sitemap), "pages")
-
-	// print out all Pages
-	for url, page := range crawler.sitemap {
-		fmt.Println("Page: ", url)
-		fmt.Println("Urls  : ")
-		for i, u := range page.urls {
-			fmt.Printf("\t%d -> %s\n", i, u)
-		}
-		fmt.Println("Assets: ")
-		for i, a := range page.assets {
-			fmt.Printf("\t%d -> %s\n", i, a)
-		}
-	}
-
-	return make([]*Page, 0), nil
+	return pages, nil
 }
 
 func (crawler *Crawler) crawl(url string) (*Page, error) {
@@ -124,6 +114,12 @@ func (crawler *Crawler) crawl(url string) (*Page, error) {
 	// only proceed to pages with 200 response code
 	if response.StatusCode != 200 {
 		INFO.Println("HTTP GET", url, "returned status:", response.Status)
+		return nil, errors.New("")
+	}
+
+	// detect redirect to subdomain or other domain
+	if !crawler.domainRegex.MatchString(response.Request.URL.String()) {
+		INFO.Println("HTTP GET", url, "detected redirect to", response.Request.URL.String())
 		return nil, errors.New("")
 	}
 
@@ -153,7 +149,7 @@ func (crawler *Crawler) gatherAssets(n *html.Node, ref string) []string {
 			switch img.Key {
 			case "src", "href":
 				u, err := crawler.processUrl(img.Val, ref)
-				if err != nil {
+				if err == nil {
 					assets = append(assets, u)
 				}
 			}
