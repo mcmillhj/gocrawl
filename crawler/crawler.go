@@ -47,11 +47,17 @@ func NewCrawler(startUrl string) (*Crawler, error) {
 	}
 
 	// build domain regex
-	urlParts := regexp.MustCompile(`\.`).Split(u.Host, 3)
+	// test for local servers or IP addresses
+	var domainRegex *regexp.Regexp
+	if strings.Count(u.Host, ".") > 2 {
+		domainRegex = regexp.MustCompile(".*")
+	} else {
+		urlParts := regexp.MustCompile(`\.`).Split(u.Host, 3)
 
-	// break hostname into pieces www.google.com -> ['www', 'google', 'com']
-	domainPattern := fmt.Sprintf("^(?:https?://)?(?:www\\.)?%s\\.%s.*$", urlParts[1], urlParts[2])
-	domainRegex := regexp.MustCompile(domainPattern)
+		// break hostname into pieces www.google.com -> ['www', 'google', 'com']
+		domainPattern := fmt.Sprintf("^(?:https?://)?(?:www\\.)?%s\\.%s.*$", urlParts[1], urlParts[2])
+		domainRegex = regexp.MustCompile(domainPattern)
+	}
 
 	return &Crawler{
 		startUrl,
@@ -106,6 +112,7 @@ func (crawler *Crawler) crawl(url string) (*Page, error) {
 		return nil, err
 	}
 
+	// only crawl HTML pages
 	if !strings.Contains(response.Header["Content-Type"][0], "text/html") {
 		INFO.Println("HTTP GET", url, "has Content-Type of", response.Header["Content-Type"])
 		return nil, errors.New("LOG: Invalid Content-Type")
@@ -223,6 +230,7 @@ func (crawler *Crawler) processUrl(href, ref string) (string, error) {
 
 		// process links with // prepended, which means inherit the current page's protocol
 		if u.Host != "" {
+			fmt.Println(u)
 			refURL, _ := url.Parse(ref)
 			// INFO.Println("Found relative URL with preceding double slash", u.String(), "inheriting referrer page's protocol", refURL.Scheme)
 			// prepend protocol of referring page to URL
