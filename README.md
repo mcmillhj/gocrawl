@@ -11,3 +11,11 @@ Overview:
 4. Examines Content-Type header of the http.Get response, discards anything
    with a 'Content-Type' that is not 'text/html' 
 
+Future Work: 
+
+1. re-factor crawl into a goroutine so more than one crawl can be happening at
+   a time
+2. obey robots.txt
+3. research more idiomatic testing practices in Go
+4. refactor Page into its own package
+
